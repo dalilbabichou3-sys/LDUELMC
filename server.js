@@ -702,7 +702,6 @@ function initCombat(b) {
       name = findPlayerName(text);
     }
     if (!name || name.toLowerCase() === b.username.toLowerCase()) return;
-    if (duel && !duel.retaliate && getTarget() && Date.now() - duel.lastSeen < 5000) return; // وسط قتال
     clearTimeout(acceptTimer);
     acceptTimer = setTimeout(() => {
       const now = Date.now();
@@ -722,13 +721,40 @@ function initCombat(b) {
       endDuel('الخصم مات، تم إلغاء نظام الضرب');
     }
   });
-  b.on('entityHurt', (e) => {
-    if (!e || !b.entity || e.id !== b.entity.id) return;
+  let lastHurtAt = 0;
+  let lastHealth = b.health || 20;
+
+  // لو الـ knockback ما انطبق من المكتبة، نطبّقه نحن بنفس قوة اللعبة (مرة وحدة بدون تكرار)
+  function checkKnockback() {
+    const t = getTarget();
+    if (!t || !b.entity) return;
+    const p0 = b.entity.position.clone();
+    setTimeout(() => {
+      try {
+        if (!b.entity || !duel) return;
+        const away = b.entity.position.minus(t.position);
+        const n = Math.hypot(away.x, away.z) || 1;
+        const ax = away.x / n, az = away.z / n;
+        const moved = (b.entity.position.x - p0.x) * ax + (b.entity.position.z - p0.z) * az;
+        if (moved < 0.25) {
+          b.entity.velocity.x += ax * 0.4;
+          b.entity.velocity.z += az * 0.4;
+          if (b.entity.onGround) b.entity.velocity.y = Math.max(b.entity.velocity.y, 0.36);
+        }
+      } catch (e) {}
+    }, 220);
+  }
+
+  function onHurt() {
     const now = Date.now();
+    if (now - lastHurtAt < 120) return;
+    lastHurtAt = now;
+    if (!b.entity || onFire() || b.entity.isInLava) return; // النار واللافا مو ضربة لاعب
     if (duel) {
       if (duel.retaliate) duel.lastHit = now;
       kbUntil = now + rnd(320, 480); // يترك الحركة ليرجع لورا مثل أي لاعب
       unfollow(); clearMove();
+      checkKnockback();
       return;
     }
     if (inLobby()) return; // في اللوبي ما يرد على أحد
@@ -743,8 +769,16 @@ function initCombat(b) {
     if (near) {
       duel = { name: near.username, since: now, lastSeen: now, lastHit: now, retaliate: true };
       inDuel = true;
+      kbUntil = now + rnd(320, 480);
+      unfollow(); clearMove();
+      checkKnockback();
       log('ضربه ' + near.username + '، البوت يدافع عن نفسه', 'warn');
     }
+  }
+  b.on('entityHurt', (e) => { if (e && b.entity && e.id === b.entity.id) onHurt(); });
+  b.on('health', () => {
+    if (b.health < lastHealth) onHurt(); // احتياط: لو حدث الضربة ما وصل نكتشفها من نزول الصحة
+    lastHealth = b.health;
   });
   try {
     b._client.on('entity_status', (p) => {
