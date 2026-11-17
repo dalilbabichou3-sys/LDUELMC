@@ -2,7 +2,8 @@
 /*
  * Duel_Me: بوت دويل واحد.
  * - يقبل آخر طلب دويل وصله بكتابة:  /duel accept اسم_اللاعب
- * - يلعب: كريستال، سبير ميس (ويند شارج + مايس)، سورد، UHC (لافا + ماء + كسر الشيلد)
+ * - يلعب: كريستال + أنكور، سبير ميس (ويند شارج + مايس)، سورد، UHC (لافا + ماء + كسر الشيلد)
+ * - بعد ما يقتل أو يُقتل يوقف الهجوم، ولا يضرب إلا من ضربه (يدافع عن نفسه)
  * - بدون هاكات: مدى ضرب 3 بلوكات، لازم يكون ناظراً للخصم، ولا يضرب من خلف الحيط.
  * التشغيل: npm install  ثم  npm start
  * اختياري (Environment في Render): MC_HOST و MC_PORT و BOT_NAME
@@ -96,6 +97,7 @@ function initCombat(b) {
   let lastAxeHit = 0, lavaReadyAt = 0, waterReadyAt = 0, waterPlacedAt = 0;
   let crystalActAt = 0, placeAt = 0, totemCheckAt = 0;
   let jit = { x: 0, y: 0, z: 0, until: 0 };
+  let reachSince = 0, anchorReadyAt = 0;
   let acceptTimer = null;
   let lastAccept = { name: '', at: 0 };
 
@@ -154,7 +156,7 @@ function initCombat(b) {
     if (now > jit.until) jit = { x: rnd(-0.12, 0.12), y: rnd(-0.15, 0.15), z: rnd(-0.12, 0.12), until: now + 500 };
     return t.position.offset(jit.x, (t.height || 1.8) * 0.6 + jit.y, jit.z);
   }
-  function faceTarget(t) { aimStep(aimPoint(t), 0.4); }
+  function faceTarget(t) { aimStep(aimPoint(t), 0.26); }
 
   // ---------- حركة ----------
   function clearMove() {
@@ -252,20 +254,50 @@ function initCombat(b) {
   }
   function tryHit(t) {
     const now = Date.now();
-    if (now < nextAttack) return false;
-    // مدى 3 بلوكات + لازم يكون ناظراً للخصم + لا ضرب من خلف الحيط
-    if (reachDist(t) > 3.0) return false;
-    if (!canSee(t)) return false;
-    if (!lookHits(t.position, 0.3, t.height || 1.8, 3.1)) return false;
-    if (Math.random() < 0.08) { nextAttack = now + rnd(80, 200); return false; }
+    const rd = reachDist(t);
+    if (rd > 3.4) { reachSince = 0; return false; }
+    if (rd > 3.0) return false; // مدى 3 بلوكات فقط
+    if (reachSince === 0) reachSince = now + rnd(220, 420); // زمن رد فعل بشري
+    if (now < reachSince || now < nextAttack) return false;
+    if (!canSee(t)) return false; // لا ضرب من خلف الحيط
+    if (!lookHits(t.position, 0.3, t.height || 1.8, 3.1)) return false; // لازم يكون ناظراً للخصم
+    if (Math.random() < 0.2) { nextAttack = now + rnd(150, 400); return false; } // مستوى عادي: يخطئ أحياناً
     const hn = heldName();
     b.attack(t);
     if (hn.endsWith('_axe')) lastAxeHit = now;
-    nextAttack = now + cooldownFor(hn) + rnd(0, 130);
+    nextAttack = now + cooldownFor(hn) + rnd(80, 350);
     return true;
   }
 
   // ---------- أكل وتوتم ----------
+  async function ensureTotem(force) {
+    const now = Date.now();
+    if (!force && now < totemCheckAt) return false;
+    totemCheckAt = now + 250;
+    const off = b.inventory.slots[45];
+    if (off && off.name === 'totem_of_undying') return false;
+    const t = find((n) => n === 'totem_of_undying');
+    if (!t) return false;
+    return await equip(t, 'off-hand');
+  }
+
+  let evadeSide = 1, evadeUntil = 0;
+  function evade() {
+    const now = Date.now();
+    const t = getTarget();
+    if (t) faceTarget(t);
+    if (now > evadeUntil) { evadeSide = Math.random() < 0.5 ? -1 : 1; evadeUntil = now + rnd(600, 1100); }
+    const d = t ? b.entity.position.distanceTo(t.position) : 99;
+    b.setControlState('back', d < 7);
+    b.setControlState('forward', false);
+    b.setControlState('sprint', false);
+    b.setControlState('left', evadeSide === -1);
+    b.setControlState('right', evadeSide === 1);
+    if (b.entity.onGround && Math.random() < 0.04) {
+      b.setControlState('jump', true);
+      setTimeout(() => { try { b.setControlState('jump', false); } catch (e) {} }, 120);
+    }
+  }
   async function maybeEat(dist) {
     if (b.health > 10) return false;
     if (dist < 2.8 && b.health > 5) return false;
@@ -273,18 +305,13 @@ function initCombat(b) {
     if (!f) return false;
     eating = true;
     unfollow(); clearMove();
+    await ensureTotem(true); // التوتم أولاً ثم الأكل
+    const mv = setInterval(() => { try { evade(); } catch (e) {} }, 100); // يمشي وهو ياكل
     try { await equip(f); await withTimeout(b.consume(), 3500); } catch (e) {}
+    clearInterval(mv);
+    clearMove();
     eating = false;
     return true;
-  }
-  async function ensureTotem() {
-    const now = Date.now();
-    if (now < totemCheckAt) return;
-    totemCheckAt = now + 3000;
-    const off = b.inventory.slots[45];
-    if (off && off.name === 'totem_of_undying') return;
-    const t = find((n) => n === 'totem_of_undying');
-    if (t) await equip(t, 'off-hand');
   }
 
   // ---------- أمان من اللافا والنار (UHC) ----------
@@ -467,9 +494,57 @@ function initCombat(b) {
     return false;
   }
 
+  // أنكور: يحط الأنكور، يشحنه بقطعة جلوستون وحدة، ثم يضغط رايت كليك عليه مرة ثانية ليتفجر
+  async function anchorCombo(t) {
+    const bx = Math.floor(t.position.x);
+    const bz = Math.floor(t.position.z);
+    const fy = Math.floor(t.position.y + 0.01);
+    const offs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]].sort(() => Math.random() - 0.5);
+    const e = eye();
+    let spot = null;
+    for (const [dx, dz] of offs) {
+      const gp = new Vec3(bx + dx, fy - 1, bz + dz);
+      const g = b.blockAt(gp);
+      if (!g || g.boundingBox !== 'block' || g.name === 'respawn_anchor') continue;
+      if (!isAir(gp.offset(0, 1, 0)) || !isAir(gp.offset(0, 2, 0))) continue;
+      if (e.distanceTo(gp.offset(0.5, 1, 0.5)) > 4.5) continue;
+      spot = g;
+      break;
+    }
+    if (!spot) return false;
+    unfollow(); clearMove();
+    await equip(find((n) => n === 'respawn_anchor'));
+    if (!(await aimUntil(spot.position.offset(0.5, 0.98, 0.5), 600, 0.1))) return false;
+    await withTimeout(b.placeBlock(spot, new Vec3(0, 1, 0)), 700).catch(() => {});
+    const apos = spot.position.offset(0, 1, 0);
+    let ab = b.blockAt(apos);
+    if (!ab || ab.name !== 'respawn_anchor') return false;
+    const center = apos.offset(0.5, 0.9, 0.5);
+    // 1) شحن بجلوستون واحدة
+    await equip(find((n) => n === 'glowstone'));
+    await aimUntil(center, 500, 0.1);
+    ab = b.blockAt(apos) || ab;
+    Promise.resolve(b.activateBlock(ab, new Vec3(0, 1, 0))).catch(() => {});
+    await sleep(rnd(180, 320));
+    // 2) رايت كليك ثاني بغير الجلوستون ليفجّره، بشرط الخصم قريب والبوت آمن
+    const off = b.inventory.slots[45];
+    const hasTotem = !!(off && off.name === 'totem_of_undying');
+    const td = t.position.distanceTo(apos);
+    const myd = b.entity.position.distanceTo(apos);
+    if (td <= 5 && (myd >= 3 || hasTotem) && (b.health >= 12 || hasTotem)) {
+      const sw = best('_sword');
+      if (sw) await equip(sw); else { try { await b.unequip('hand'); } catch (e) {} }
+      await aimUntil(center, 500, 0.1);
+      ab = b.blockAt(apos);
+      if (ab && ab.name === 'respawn_anchor') {
+        Promise.resolve(b.activateBlock(ab, new Vec3(0, 1, 0))).catch(() => {});
+      }
+    }
+    return true;
+  }
+
   async function crystalFight(t, dist) {
     const now = Date.now();
-    await ensureTotem();
     if (now >= crystalActAt) {
       const cr = nearestCrystal(t);
       if (cr && breakCrystal(cr)) {
@@ -485,6 +560,12 @@ function initCombat(b) {
       return;
     }
     ringMove(t, dist, 3.5, 5);
+    const anchor = find((n) => n === 'respawn_anchor');
+    const glow = find((n) => n === 'glowstone');
+    if (anchor && glow && now >= anchorReadyAt && dist <= 7 && b.health >= 10) {
+      anchorReadyAt = now + rnd(7000, 11000);
+      if (await anchorCombo(t)) return;
+    }
     if (now >= placeAt) {
       placeAt = now + rnd(300, 560);
       await placeNear(t);
@@ -494,7 +575,7 @@ function initCombat(b) {
   // ---------- الحلقة الرئيسية ----------
   function detectMode() {
     if (find((n) => n === 'mace')) return 'spearmace';
-    if (find((n) => n === 'end_crystal')) return 'crystal';
+    if (find((n) => n === 'end_crystal' || n === 'respawn_anchor')) return 'crystal';
     if (find((n) => n === 'lava_bucket')) return 'uhc';
     return 'sword';
   }
@@ -519,6 +600,7 @@ function initCombat(b) {
 
   async function fight() {
     const now = Date.now();
+    if (duel.retaliate && now - duel.lastHit > 25000) { endDuel('هدأت الأمور، البوت يوقف الدفاع'); return; }
     const t = getTarget();
     if (!t) {
       if (now - duel.lastSeen > 12000) endDuel('انتهى الدويل (الخصم غير موجود)');
@@ -528,6 +610,7 @@ function initCombat(b) {
     if (now - duel.since > 6 * 60e3) { endDuel('انتهى الوقت'); return; }
     const dist = b.entity.position.distanceTo(t.position);
     if (dist > 48) return;
+    if (await ensureTotem()) return; // لو انكسر التوتم يلبس غيره فوراً قبل أي شيء
     if (await lavaSafety()) return;
     if (await maybeEat(dist)) return;
     const mode = detectMode();
@@ -564,6 +647,11 @@ function initCombat(b) {
     let raw = '';
     try { text = jsonMsg.toString(); } catch (e) {}
     try { raw = JSON.stringify(jsonMsg.json || jsonMsg); } catch (e) {}
+    if (duel && !duel.retaliate && text.toLowerCase().includes(duel.name.toLowerCase())
+        && /won|winner|victory|defeated|slain|killed|died/i.test(text)) {
+      endDuel('انتهى الدويل، تم إلغاء نظام الضرب');
+      return;
+    }
     const hasDuel = /duel/i.test(text) || /\/duel\s+accept/i.test(raw);
     if (!hasDuel) return;
     log('رسالة دويل: ' + text.slice(0, 160), 'info');
@@ -576,7 +664,7 @@ function initCombat(b) {
       name = findPlayerName(text);
     }
     if (!name || name.toLowerCase() === b.username.toLowerCase()) return;
-    if (duel && getTarget() && Date.now() - duel.lastSeen < 5000) return; // وسط قتال
+    if (duel && !duel.retaliate && getTarget() && Date.now() - duel.lastSeen < 5000) return; // وسط قتال
     clearTimeout(acceptTimer);
     acceptTimer = setTimeout(() => {
       const now = Date.now();
@@ -590,7 +678,35 @@ function initCombat(b) {
   }
 
   b.on('message', onChat);
-  b.on('death', () => endDuel('مات البوت، انتهى الدويل'));
+  b.on('death', () => endDuel('مات البوت، تم إلغاء نظام الضرب'));
+  b.on('entityDead', (e) => {
+    if (duel && e && e.type === 'player' && e.username && e.username.toLowerCase() === duel.name.toLowerCase()) {
+      endDuel('الخصم مات، تم إلغاء نظام الضرب');
+    }
+  });
+  b.on('entityHurt', (e) => {
+    if (!e || !b.entity || e.id !== b.entity.id) return;
+    const now = Date.now();
+    if (duel) { if (duel.retaliate) duel.lastHit = now; return; }
+    // ما في دويل: يرد فقط على اللي ضربه (أقرب لاعب)
+    let near = null, nd = 5;
+    for (const k of Object.keys(b.players)) {
+      const p = b.players[k];
+      if (!p.entity || p.username === b.username) continue;
+      const d = b.entity.position.distanceTo(p.entity.position);
+      if (d < nd) { near = p; nd = d; }
+    }
+    if (near) {
+      duel = { name: near.username, since: now, lastSeen: now, lastHit: now, retaliate: true };
+      inDuel = true;
+      log('ضربه ' + near.username + '، البوت يدافع عن نفسه', 'warn');
+    }
+  });
+  try {
+    b._client.on('entity_status', (p) => {
+      if (b.entity && p.entityId === b.entity.id && p.entityStatus === 35) totemCheckAt = 0; // انكسر التوتم
+    });
+  } catch (e) {}
   const timer = setInterval(tick, 50);
   return {
     stop() { clearInterval(timer); clearTimeout(acceptTimer); inDuel = false; }
