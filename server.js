@@ -4,6 +4,8 @@
  * - يقبل آخر طلب دويل وصله بكتابة:  /duel accept اسم_اللاعب
  * - يلعب: كريستال + أنكور، سبير ميس (ويند شارج + مايس)، سورد، UHC (لافا + ماء + كسر الشيلد)
  * - بعد ما يقتل أو يُقتل يوقف الهجوم، ولا يضرب إلا من ضربه (يدافع عن نفسه)
+ * - في عالم اللوبي (اسمه lhub) ما يضرب أبداً إلا إذا قبل دويل. وفي أي عالم ثاني يضرب. غيّر الاسم بـ LOBBY_WORLD
+ * - لما ينضرب يترك الحركة لحظة ليتأثر بالـ knockback ولا يثبت في مكانه
  * - بدون هاكات: مدى ضرب 3 بلوكات، لازم يكون ناظراً للخصم، ولا يضرب من خلف الحيط.
  * التشغيل: npm install  ثم  npm start
  * اختياري (Environment في Render): MC_HOST و MC_PORT و BOT_NAME
@@ -25,6 +27,7 @@ const WEB_PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.MC_HOST || 'lhubx.funserver.top';
 const MC_PORT = Number(process.env.MC_PORT || 25565);
 const NAME = process.env.BOT_NAME || 'Duel_Me';
+const LOBBY_WORLD = (process.env.LOBBY_WORLD || 'lhub').toLowerCase();
 
 let bot = null;
 let state = 'offline';
@@ -97,7 +100,7 @@ function initCombat(b) {
   let lastAxeHit = 0, lavaReadyAt = 0, waterReadyAt = 0, waterPlacedAt = 0;
   let crystalActAt = 0, placeAt = 0, totemCheckAt = 0;
   let jit = { x: 0, y: 0, z: 0, until: 0 };
-  let reachSince = 0, anchorReadyAt = 0;
+  let reachSince = 0, anchorReadyAt = 0, kbUntil = 0;
   let acceptTimer = null;
   let lastAccept = { name: '', at: 0 };
 
@@ -284,6 +287,7 @@ function initCombat(b) {
   let evadeSide = 1, evadeUntil = 0;
   function evade() {
     const now = Date.now();
+    if (now < kbUntil) { clearMove(); return; }
     const t = getTarget();
     if (t) faceTarget(t);
     if (now > evadeUntil) { evadeSide = Math.random() < 0.5 ? -1 : 1; evadeUntil = now + rnd(600, 1100); }
@@ -573,6 +577,25 @@ function initCombat(b) {
   }
 
   // ---------- الحلقة الرئيسية ----------
+  // ---------- العالم: في اللوبي ما يضرب ----------
+  function worldNames() {
+    const g = b.game || {};
+    const out = [];
+    for (const v of [g.worldName, g.dimension, g.dimensionName]) {
+      if (typeof v === 'string' && v) out.push(v.toLowerCase());
+    }
+    return out;
+  }
+  const inLobby = () => worldNames().some((w) => w.includes(LOBBY_WORLD));
+  let lastWorld = null;
+  function checkWorld() {
+    const w = worldNames().join(' / ');
+    if (w === lastWorld) return;
+    lastWorld = w;
+    log('العالم الحالي: ' + (w || 'غير معروف') + (inLobby() ? ' (لوبي، لا ضرب)' : ''), 'info');
+    if (inLobby() && duel && duel.retaliate) endDuel('دخل اللوبي، تم إلغاء الدفاع');
+  }
+
   function detectMode() {
     if (find((n) => n === 'mace')) return 'spearmace';
     if (find((n) => n === 'end_crystal' || n === 'respawn_anchor')) return 'crystal';
@@ -622,6 +645,21 @@ function initCombat(b) {
 
   async function tick() {
     if (busy || !duel || eating) return;
+    if (inLobby()) {
+      // اللوبي: لا ضرب إلا إذا في دويل مقبول لسه ما انتهى
+      if (duel.retaliate || duel.sawArena || Date.now() - duel.since > 120000) {
+        endDuel('البوت في اللوبي، تم إلغاء نظام الضرب');
+        return;
+      }
+    } else {
+      duel.sawArena = true; // صار في عالم الدويل
+    }
+    if (Date.now() < kbUntil) { // انضرب: يترك الحركة لحظة ليتأثر بالـ knockback
+      unfollow(); clearMove();
+      const tg = getTarget();
+      if (tg) faceTarget(tg);
+      return;
+    }
     busy = true;
     try { await fight(); } catch (e) {} finally { busy = false; }
   }
@@ -687,7 +725,13 @@ function initCombat(b) {
   b.on('entityHurt', (e) => {
     if (!e || !b.entity || e.id !== b.entity.id) return;
     const now = Date.now();
-    if (duel) { if (duel.retaliate) duel.lastHit = now; return; }
+    if (duel) {
+      if (duel.retaliate) duel.lastHit = now;
+      kbUntil = now + rnd(320, 480); // يترك الحركة ليرجع لورا مثل أي لاعب
+      unfollow(); clearMove();
+      return;
+    }
+    if (inLobby()) return; // في اللوبي ما يرد على أحد
     // ما في دويل: يرد فقط على اللي ضربه (أقرب لاعب)
     let near = null, nd = 5;
     for (const k of Object.keys(b.players)) {
@@ -708,8 +752,9 @@ function initCombat(b) {
     });
   } catch (e) {}
   const timer = setInterval(tick, 50);
+  const wtimer = setInterval(checkWorld, 500);
   return {
-    stop() { clearInterval(timer); clearTimeout(acceptTimer); inDuel = false; }
+    stop() { clearInterval(timer); clearInterval(wtimer); clearTimeout(acceptTimer); inDuel = false; }
   };
 }
 
