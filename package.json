@@ -1,0 +1,14 @@
+{
+  "name": "duel-me-bot",
+  "version": "2.0.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "mineflayer": "^4.23.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "vec3": "^0.1.10",
+    "ws": "^8.18.0"
+  }
+}
